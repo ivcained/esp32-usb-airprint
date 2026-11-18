@@ -406,6 +406,65 @@ static esp_err_t start_mdns(const char *hostname)
     return announce(hostname);
 }
 
+// Relay mode: the regular driver/announce path never runs, so advertise the
+// relay itself. Same service names iOS looks for, with a fixed TXT set instead
+// of driver strings. `port` is the relay's listener.
+esp_err_t airprint_relay_announce(const char *hostname, uint16_t port)
+{
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK)
+        return err;
+    mdns_hostname_set(hostname);
+    mdns_instance_name_set(PRINTER_NAME);
+
+    char adminurl[96];
+    snprintf(adminurl, sizeof(adminurl), "http://%s.local/", hostname);
+    mdns_txt_item_t txt[] = {
+        {"txtvers", "1"},
+        {"qtotal", "1"},
+        {"rp", "ipp/print"},
+        {"ty", PRINTER_NAME},
+        {"note", ""},
+        {"adminurl", adminurl},
+        {"priority", "50"},
+        {"pdl", "image/urf,image/pwg-raster,application/pdf"},
+        {"URF", "V1.4,CP1,W8,RS300,SRGB24"},
+        {"kind", "document"},
+        {"PaperMax", "<legal-A4"},
+        {"Color", "T"},
+        {"Duplex", "F"},
+        {"Copies", "F"},
+        {"air", "none"},
+        {"Transparent", "T"},
+        {"Binary", "T"},
+        {"TBCP", "F"},
+        {"Fax", "F"},
+        {"Scan", "F"},
+    };
+    err = mdns_service_add(PRINTER_NAME, "_ipp", "_tcp", port, txt, sizeof(txt) / sizeof(txt[0]));
+    if (err != ESP_OK)
+        return err;
+    esp_err_t e1 = mdns_service_subtype_add_for_host(PRINTER_NAME, "_ipp", "_tcp", hostname, "_universal");
+    esp_err_t e2 = mdns_service_subtype_add_for_host(PRINTER_NAME, "_ipp", "_tcp", hostname, "_print");
+    if (e1 != ESP_OK || e2 != ESP_OK)
+        ESP_LOGW(TAG, "subtype %s/%s", esp_err_to_name(e1), esp_err_to_name(e2));
+
+    /* Phones cache the previous instance name and say "printer offline" when
+     * it stops existing, so keep serving it next to the current one. */
+    static const char legacy[] = "Canon G2020 (ESP32)";
+    if (strcmp(legacy, PRINTER_NAME) != 0) {
+        esp_err_t e3 = mdns_service_add(legacy, "_ipp", "_tcp", port, txt, sizeof(txt) / sizeof(txt[0]));
+        if (e3 == ESP_OK) {
+            mdns_service_subtype_add_for_host(legacy, "_ipp", "_tcp", hostname, "_universal");
+            mdns_service_subtype_add_for_host(legacy, "_ipp", "_tcp", hostname, "_print");
+        } else {
+            ESP_LOGW(TAG, "legacy name %s", esp_err_to_name(e3));
+        }
+    }
+    ESP_LOGI(TAG, "announced \"%s\" as %s.local:%u", PRINTER_NAME, hostname, port);
+    return ESP_OK;
+}
+
 // What IPP, eSCL and mDNS say the printer is. Other tasks read these while
 // they change: each pointer is written whole, and the device id that was
 // replaced stays valid until the next change.

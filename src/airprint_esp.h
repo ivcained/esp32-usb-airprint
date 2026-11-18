@@ -11,3 +11,6 @@ esp_err_t airprint_esp_start(const char *hostname, void (*on_job_state)(bool pri
 // print_job_driver() changed (a printer of another model was plugged in):
 // IPP, eSCL and mDNS now name that model. Nothing before airprint_esp_start.
 void airprint_esp_driver_changed(void);
+// Relay mode: advertise _ipp._tcp on `port` for an IPP-USB passthrough, without
+// the driver path. Call once after the relay is listening.
+esp_err_t airprint_relay_announce(const char *hostname, uint16_t port);

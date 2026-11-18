@@ -74,3 +74,9 @@ esp_err_t usb_scanner_begin(void);
 int usb_scanner_write(const uint8_t *data, size_t len, uint32_t timeout_ms);
 int usb_scanner_read(uint8_t *buf, size_t len, uint32_t timeout_ms);
 void usb_scanner_end(void);
+
+// IPP-USB relay: listen on `port` and bridge each TCP connection straight to
+// the printer's IPP-USB portals (needs PRINTER_RELAY).
+esp_err_t usb_printer_relay_start(uint16_t port);
+// Unplug/replug handling: park every portal so relay_setup can rebuild it.
+void usb_printer_relay_reset(void);

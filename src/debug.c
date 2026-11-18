@@ -10,6 +10,8 @@
 #include <unistd.h>
 
 #include "esp_app_desc.h"
+#include "usb/usb_host.h"
+#include "usb_printer.h"
 #include "esp_attr.h"
 #include "esp_core_dump.h"
 #include "esp_heap_caps.h"
@@ -518,6 +520,26 @@ static esp_err_t reboot_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Power-cycle the USB root port: the only way to wake a sleeping printer and
+// the only clean way to clear a wedged portal. The device re-enumerates.
+static void wake_cb(void *arg)
+{
+    vTaskDelay(pdMS_TO_TICKS(200));
+    usb_host_lib_set_root_port_power(false);
+    vTaskDelay(pdMS_TO_TICKS(600));
+    usb_host_lib_set_root_port_power(true);
+    ESP_LOGW(TAG, "usb port power cycled");
+    vTaskDelete(NULL);
+}
+
+static esp_err_t wake_post(httpd_req_t *req)
+{
+    send_text(req, "200 OK", "waking\n");
+    usb_printer_relay_reset();
+    xTaskCreate(wake_cb, "wake", 3072, NULL, 6, NULL);
+    return ESP_OK;
+}
+
 // a deliberate crash, to try the core dump tools
 static void panic_cb(void *arg)
 {
@@ -641,6 +663,7 @@ esp_err_t debug_server_start(bool (*busy)(void))
         {.uri = "/log", .method = HTTP_GET, .handler = log_get},
         {.uri = "/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/reboot", .method = HTTP_POST, .handler = reboot_post},
+        {.uri = "/wake", .method = HTTP_POST, .handler = wake_post},
         {.uri = "/coredump", .method = HTTP_GET, .handler = coredump_get},
         {.uri = "/coredump/erase", .method = HTTP_POST, .handler = coredump_erase_post},
         {.uri = "/symbols", .method = HTTP_GET, .handler = symbols_get},

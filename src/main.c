@@ -269,8 +269,19 @@ void app_main(void)
     xTaskCreate(ota_confirm_task, "ota_confirm", 3072, NULL, 2, NULL);
     // AirPrint; the printer keeps working locally if WiFi isn't configured
     if (wifi_start(HOSTNAME) == ESP_OK) {
+#ifdef PRINTER_RELAY
+        if (usb_printer_relay_start(RELAY_PORT) != ESP_OK)
+            ESP_LOGE(TAG, "IPP-USB relay failed to start");
+        else
+        {
+            ESP_LOGI(TAG, "IPP-USB relay on port %d", RELAY_PORT);
+            if (airprint_relay_announce(HOSTNAME, RELAY_PORT) != ESP_OK)
+                ESP_LOGE(TAG, "mDNS announce failed");
+        }
+#else
         if (airprint_esp_start(HOSTNAME, on_airprint_job) != ESP_OK)
             ESP_LOGE(TAG, "AirPrint failed to start");
+#endif
         if (debug)
             s_debug_server_up = debug_server_start(device_busy) == ESP_OK;
     }
