@@ -1,124 +1,90 @@
-# Add AirPrint / AirScan support to your old printer, using just a cheap ESP32-S3
+# AirPrint relay for USB printers the stock firmware cannot drive
 
-> [!IMPORTANT]
-> This project is actively looking for contributors to add support for more printers. Most importantly, you need to really own the printer you add: every driver must be tested on the real hardware, not only in emulation. See [Adding a printer](#adding-a-printer) to get started.
+A fork of [ngxson/esp32-usb-to-airprint](https://github.com/ngxson/esp32-usb-to-airprint)
+that adds an **IPP-over-USB relay**. Instead of rendering a printer's own
+language, the board advertises AirPrint and forwards each HTTP/IPP request into
+the printer's own IPP-USB portal, so a printer that the stock firmware cannot
+drive still prints from a phone or a Mac with no computer in the path.
 
+Built and measured on a **Canon PIXMA G2020** (`04a9:18bd`). That model is the
+reason the fork exists: the stock firmware's Canon (BJL) driver detects it,
+accepts a job and records `completed`, while nothing comes out of the printer.
+The G2020 refuses the BJL print service (`StartJobResponse NG NotSupportService`)
+and its real channel is IPP over USB.
 
-Turns any USB-only printers into a wireless printer and scanner. An ESP32-S3 board plugs into the printer's USB port and joins your WiFi:
+## Status
 
-- **Print** from iPhone, iPad and Mac (AirPrint), Android (Mopria) and Linux, with no drivers or apps.
-- **Scan** from any browser, from Image Capture and Preview on a Mac, or with the button on the board.
-- **A web app** on your phone or computer: print PDFs and pictures, scan, keep the files in the browser, and put pages together (rotate, crop, ID card copies) into a PDF.
-
-![](./docs/IMG_3577.jpeg)
-
-| | |
+| Path | State |
 |---|---|
-| ![](./docs/screenshot-printer.png) | ![](./docs/screenshot-scanned.png) |
-| ![](./docs/screenshot-files.png) | ![](./docs/screenshot-process.png) |
+| Mac, queue on port 631 via the advertised name | **verified** — jobs complete, paper moves |
+| A single chunked `Print-Job` (68 KB real Apple Raster), the exact request an iPhone sends | **verified** — relayed, paper moves |
+| iPhone | **in progress** — lists the printer, discovery and Validate-Job reach the relay, but the sheet drops the printer before the job stage |
+| Android | **in progress** — lists the printer, then the sheet sits on "Preparing preview" |
 
-## Supported printers
+The remaining work is in the `Get-Printer-Attributes` body, not the transport.
+`ipptool` still reports one structural defect on the reply, so the next commit is
+a byte-level fix to the answer, not another driver port.
 
-| Series | Models | Scan |
-|---|---|---|
-| 🟢 MG2500 | MG2550S | yes |
-| 🟡 MG2400 | MG2410 to MG2490 | yes |
-| 🟡 MG2500 | MG2510 to MG2590 (other than the MG2500S) | yes |
-| 🟡 P200 | P200 | no scanner |
-| 🟡 MG2900 | MG2910 to MG2990 | yes |
-| 🟡 MG3000 | MG3010 to MG3090 | yes |
-| 🟡 E470 | E470 to E478 | yes |
-| 🟡 E460 | E460 to E468 | yes |
-| 🟡 iP2800 | iP2810 to iP2899 | no scanner |
-| 🟡 E3100 | E3170 to E3195 | yes |
-| 🟡 TS3100 | TS3110 to TS3195 | yes |
-| 🟡 MP230 | MP230 to MP237 | yes |
-| 🟡 iP2700 | iP2700 to iP2788 | no scanner |
-| 🟡 MP250, MP270, MP280 | MP250 to MP288 | yes |
-| 🟡 MP490, MP493, MP495 | MP490 to MP499 | yes |
-| 🟡 MX340, MX350 | MX340 to MX358 | yes (glass only) |
-| 🟡 MX360, MX410, MX420 | MX360 to MX428 | yes (glass only) |
+## What it does
 
-- 🟢 Validated on real printer
-- 🟡 Expected to work, not tested on real hardware yet.
+- `MODE=debug` gives an HTTP server on **8080** (`/info`, `/log`, `/coredump`,
+  `POST /reboot`) so the board can be followed and updated over WiFi with no
+  serial console.
+- A relay on **631** that advertises `_ipp._tcp` (with the `_universal` and
+  `_print` subtypes iOS browses) and forwards each request into the portal.
+- `Get-Printer-Attributes` (`0x0009` **and** `0x000b`), `Validate-Job` and
+  `Get-Job-Attributes` are answered by the board itself. The portal's answer is
+  too thin for iOS and it never answers `Validate-Job` at all.
+- Whole-body buffering with chunked framing resolved into `Content-Length`, and a
+  USB emit that loops in 4096-byte slices, so a 68 KB phone job no longer
+  overruns the transfer buffer and reboots the board.
 
-The firmware recognises the printer when it is plugged in. Other printers? Please open an issue or a PR.
+## Hardware
 
-## What you need
+See the upstream hardware notes. In short: an ESP32-S3 with the native USB-OTG
+port, a passive USB-C OTG splitter for power, and **no hub** between the board and
+the printer. Flashed to 8 MB with the partition table in `partitions.csv`.
 
-Just one thing: An ESP32-S3 dev board with two USB-C ports:
+## Build
 
-![](./docs/amazon.png)
+```bash
+cp .env.example .env      # WIFI_SSID, WIFI_PASSWORD, PRINTER_NAME, HOSTNAME
+pio run -t upload
+```
 
-Optionally: a SSD1315 OLED screen and a 3D-printed case, see later in this tutorial
+`.env` is git-ignored; `src/local_config.h` is generated from it at build time,
+so rename the printer or host there and rebuild rather than editing the header.
 
-## Setup
+## Verify without a phone
 
-**Step 1: Hardware.** Plug the ESP32-S3 into your computer via the COM port on the ESP32 board (NOT the port labelled "USB")
+```bash
+ipptool -tv ipp://<host>.local:631/ipp/print test/gpa.test   # capability answer
+lpadmin -p test -v ipp://<host>.local:631/ipp/print -m everywhere -E
+lp -d test /usr/share/cups/data/testprint
+```
 
-![](./docs/IMG_3538.jpeg)
+`lpadmin -m everywhere` runs CUPS' own driverless PPD builder over the answer and
+is the cheapest gate: when it succeeds, a driverless client will accept the
+printer.
 
-**Step 2: Settings.** Build once (`pio run`): this creates `.env`. Edit it:
-   ```
-   WIFI_SSID=your-network
-   WIFI_PASSWORD=your-password
-   PRINTER_NAME=Canon MG2500 (ESP32)
-   HOSTNAME=canon-mg2500
-   MODE=debug
-   ```
-   `MODE=debug` lets you update the board over WiFi later (see below); `MODE=normal` does without. `.env` is git-ignored, so your WiFi password stays local.
+## Follow the printer's real log
 
-**Step 3: Flash.** Connect the board's **COM** port to your computer and run `pio run -t upload`. PlatformIO finds the board's serial port; if several are connected, add `--upload-port /dev/cu.usbmodem…`.
+`GET http://<host>:8080/log` shows the requests, the portal state and the USB
+transfers. `GET /info` shows the portal interface and free memory. Judge a job by
+paper, never by a status field: `completed` means the bytes left the board.
 
-## Using it
+## Notes worth carrying over to other printers
 
-Plug the printer to the port labelled "USB"
-
-NOTE: You may also need to bridge the "USB-OTG" solder join on the board, so that it supplies 5V to the printer. While the printer doesn't actively use 5V, it sense the USB plug using this signal.
-
-- **The web app:** open `http://canon-mg2500.local/` (your `HOSTNAME`) on your phone or computer.
-- **The button on the board** (BOOT, or one on GPIO4): press to scan, press twice for a test page, hold 2 s to cancel.
-- **Print from a phone or a Mac:** on an iPhone, Share → Print and pick the printer. On a Mac, add it in System Settings → Printers & Scanners.
-- **Scan on a Mac:** open Image Capture (or Preview → File → Import from Scanner) and pick the printer.
-
-## Adding OLED screen and buttons
-
-This step is **optional**, you can connect a SSD1315 OLED screen with the pinout below:
-
-| OLED | ESP32-S3 |
-|---|---|
-| VCC | 3V3 |
-| GND | GND |
-| SCL | GPIO41 |
-| SDA | GPIO42 |
-
-Connect it before powering on: the board only looks for it at startup.
-
-![](./docs/IMG_3568.jpeg)
-
-For buttons, wire each one between a pin and GND:
-
-| Button | ESP32-S3 | Action |
-|---|---|---|
-| 1 | GPIO4 | Same as BOOT (scan, test page, cancel) |
-| 2 | GPIO5 | Not assigned: add your own in `on_user_button()` (`src/main.c`) |
-
-While the screen is off, a press only wakes it up.
-
-## Development
-
-Set `MODE=dev` and flash: print jobs are processed but not printed, and scans show a built-in test page.
-
-On the computer, without the board: `make -C host && cd host && ./airprint_host`, then open http://localhost:8631/ (an emulated printer and scanner). To work on the web app with live reloading: `cd web && npm run dev` (it talks to that server; `DEVICE=http://<board IP> npm run dev` talks to the board).
-
-Technical details are in [AGENTS.md](AGENTS.md).
-
-## Adding a printer
-
-Each printer model is a driver in `components/printers/`, listed in `printers.c`; the firmware picks the one of the printer that is plugged in. A Canon PIXMA whose stream is close to the MG2500's is one line in `canon_pixma.c`; another printer is a new file in the same folder. See [AGENTS.md](AGENTS.md) for details.
+- Apple Raster is listed by iOS as `urf-supported`, so a printer that only does
+  PWG raster usually still accepts `image/urf` through CUPS' `cgpdftoraster`.
+- Do not put a USB hub in the path: ESP-IDF's host stack has limited hub support
+  and the printer fails to enumerate.
+- `Content-Length` must be recomputed for every rewritten head, and
+  `Host: localhost` is mandatory for the portal.
+- An attribute answer that parses but repeats a set's name on every value is
+  rejected by CUPS as duplicate attributes; a set names only its first value.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
-
-The printer and scanner protocols follow [Gutenprint](https://gimp-print.sourceforge.io/) and [SANE](http://www.sane-project.org/)'s pixma backend. The JPEG encoder's DCT is a translation of libjpeg's `jfdctint.c`: this software is based in part on the work of the Independent JPEG Group. The web UI bundles [Svelte](https://svelte.dev/) (MIT) and [pdf.js](https://mozilla.github.io/pdf.js/) (Apache-2.0).
+The upstream project's license and copyrights are kept (MIT, see `LICENSE`).
+`src/usb_printer.c` carries the G2020 relay work.
